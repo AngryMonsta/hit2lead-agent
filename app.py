@@ -1,13 +1,7 @@
 """
 app.py
 ------
-One-page Streamlit dashboard for the ChEMBL + RDKit drug-discovery agent.
-
-Shows:
-    - A prompt input box
-    - The agent's step-by-step tool calls ("thoughts")
-    - A structured table of results (bioactivities and/or Lipinski descriptors)
-    - 2D molecule images rendered with RDKit
+One-page Streamlit page for the Hit to Lead drug-discovery agent.
 
 Run with:
     streamlit run app.py
