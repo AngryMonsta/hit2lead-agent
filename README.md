@@ -7,8 +7,8 @@ The agent connects structured compound records (from ChEMBL or custom/synthetic 
 ## Key Features
 
 1. **Medicinal Chemistry Assistant**: Interacts with compound screens using natural language. For example: *"Which molecules targeting SMARCA2 have an IC50 < 1 uM and pass Lipinski rules?"* or *"Cluster the compounds and analyze the structure-activity relationship."*
-2. **Unified Data Support**: Seamlessly queries the live **ChEMBL Database** or your own **Custom LIMS CSV/Excel** files. 
-3. **In-Memory RAG & Pandas Execution**: Generates exact, secure pandas/RDKit operations on the fly for structured properties, and uses an in-memory **FAISS Vector RAG** to search free-text annotations/comments semantically.
+2. **Unified Data Support**: Seamlessly queries the live ChEMBL Database or your own Custom LIMS CSV/Excel files. 
+3. **In-Memory RAG & Pandas Execution**: Generates exact, secure pandas/RDKit operations on the fly for structured properties, and uses an in-memory FAISS Vector RAG to search free-text annotations/comments semantically.
 4. **Interactive Dashboard**: Renders agent tool thought traces in real-time, displaying clean data tables and RDKit-drawn 2D molecular structures of the prioritized hits.
 5. **Smart API Caching**: Automatically caches ChEMBL target searches and bioactivity fetches using Streamlit caching to speed up subsequent queries and save API quotas.
 
