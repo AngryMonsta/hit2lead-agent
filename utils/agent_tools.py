@@ -21,6 +21,8 @@ from typing import Optional
 import streamlit as st
 import pandas as pd
 from langchain.agents import create_agent
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import tool
 from langchain_community.vectorstores import FAISS
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
@@ -573,6 +575,31 @@ def perform_sar_analysis() -> str:
         return f"Error running SAR analysis: {str(e)}"
 
 
+@tool
+def predict_compound_admet(smiles: str, molecule_id: str = "Molecule 1") -> dict:
+    """
+    Predict ADMET properties for a given SMILES string and generate a radar summary card.
+    The predictions and the plot will be cached and displayed in the Streamlit UI.
+    """
+    try:
+        from admet_pred import generate_admet_card_native
+        
+        # Run prediction and generate matplotlib figure
+        fig, preds_df = generate_admet_card_native(smiles, molecule_id)
+        
+        # Save to global LAST_RESULTS so the Streamlit UI can render them
+        LAST_RESULTS["admet_predictions"] = preds_df
+        LAST_RESULTS["admet_fig"] = fig
+        
+        # Return structured results to LLM
+        return {
+            "smiles": smiles,
+            "admet_summary": preds_df.to_dict(orient="records")[0],
+        }
+    except Exception as e:
+        return {"error": f"ADMET evaluation failed: {str(e)}"}
+
+
 TOOLS = [
     search_chembl_target,
     lookup_target_by_exact_name,
@@ -583,6 +610,7 @@ TOOLS = [
     perform_sar_analysis,
     query_uploaded_lims,
     search_uploaded_notes,
+    predict_compound_admet,
 ]
 
 
@@ -590,12 +618,16 @@ SYSTEM_PROMPT = (
     "You are a drug-discovery research assistant. You have tools to search "
     "ChEMBL targets, fetch IC50/Ki/EC50 bioactivity data, compute Lipinski "
     "Rule-of-Five descriptors with RDKit, cluster molecules into chemotypes (scaffolds), "
-    "and perform SAR analysis (Ligand Efficiency). When a user names a target, first try "
+    "perform SAR analysis (Ligand Efficiency), and predict ADMET properties using admet_ai. "
+    "When a user names a target, first try "
     "lookup_target_by_exact_name if they give (or you know) ChEMBL's exact "
     "preferred name; otherwise use search_chembl_target for a fuzzy lookup "
     "(e.g. 'EGFR'). Once you have a target_chembl_id, call fetch_bioactivities "
-    "ONCE, then calculate_lipinski_for_dataset, cluster_dataset_by_chemotype, and "
-    "perform_sar_analysis as appropriate or when requested.\n\n"
+    "to load the data. Do NOT automatically run downstream analyses (such as "
+    "calculate_lipinski_for_dataset, cluster_dataset_by_chemotype, or perform_sar_analysis) "
+    "unless the user's prompt explicitly requests them (e.g., asking for Lipinski rule compliance, "
+    "clustering, or SAR analysis). If the user only asks to find/fetch bioactivity data, stop "
+    "after calling fetch_bioactivities.\n\n"
     "PREFER PRE-BUILT TOOLS FOR STANDARD WORKFLOWS: For standard operations (fetching target data, "
     "calculating Lipinski Rule-of-Five properties, clustering molecules, or running SAR analysis), "
     "you should ALWAYS prefer using the pre-built pipeline tools: `lookup_target_by_exact_name`, "
@@ -608,6 +640,7 @@ SYSTEM_PROMPT = (
     "asks custom questions that cannot be answered by the standard tools (such as finding the molecule with the "
     "smallest/largest IC50, custom column filtering, or custom mathematical calculations).\n\n"
     "If there are comments/notes in the local dataset, you can use `search_uploaded_notes` to perform vector search.\n\n"
+    "If the user asks you to predict or calculate ADMET properties for a compound, call the `predict_compound_admet` tool.\n\n"
     "Only report compound IDs and SMILES that are explicitly present in the tool outputs. "
     "To find which molecule corresponds to a specific value (like the minimum IC50), write Python code for "
     "`query_uploaded_lims` that returns the full row containing both the compound ID and the value (e.g. `df.nsmallest(1, 'ic50_um')`), "
@@ -624,6 +657,250 @@ SYSTEM_PROMPT = (
 #     through the whole daily quota.
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 MAX_AGENT_STEPS = 15
+
+
+TARGET_LOOKUP_SYSTEM_PROMPT = (
+    "You are a target lookup agent. Your task is to resolve a misspelled, "
+    "abbreviated, or incorrect target name to the single closest valid target preferred name "
+    "available in the provided context. You can use the search tool if needed. When you find the best match, "
+    "output ONLY the resolved exact target name (e.g. 'Epidermal growth factor receptor' "
+    "or 'CDK4_Kinase') without any explanation, intro, punctuation, or formatting."
+)
+
+
+def build_target_lookup_agent(model_name: str = DEFAULT_MODEL, temperature: float = 0.0):
+    """
+    Build a downstream target lookup agent bound to search_chembl_target tool.
+    """
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    from langchain_core.rate_limiters import InMemoryRateLimiter
+
+    rate_limiter = InMemoryRateLimiter(requests_per_second=0.2, check_every_n_seconds=0.5, max_bucket_size=1)
+    llm = ChatGoogleGenerativeAI(
+        model=model_name,
+        temperature=temperature,
+        max_retries=5,
+        rate_limiter=rate_limiter,
+    )
+    return create_agent(llm, tools=[search_chembl_target], system_prompt=TARGET_LOOKUP_SYSTEM_PROMPT)
+
+
+class FuzzyMatchRecoveryMiddleware(AgentMiddleware):
+    """
+    LangGraph middleware to intercept tool failures on lookup_target_by_exact_name
+    and recover gracefully using a downstream target lookup agent to find the closest target.
+    
+    If the downstream agent fails or API keys are missing, it falls back to
+    programmatic fuzzy matching for robustness.
+    """
+    def __init__(self):
+        super().__init__()
+        self._lookup_agent = None
+
+    def get_lookup_agent(self):
+        if self._lookup_agent is None:
+            self._lookup_agent = build_target_lookup_agent()
+        return self._lookup_agent
+    
+    def wrap_tool_call(self, request, handler):
+        tool_name = request.tool.name if request.tool else request.tool_call["name"]
+        
+        # We only intercept lookup_target_by_exact_name
+        if tool_name != "lookup_target_by_exact_name":
+            return handler(request)
+            
+        # Try running the tool as originally requested
+        res = handler(request)
+        
+        # Check if the result is a ToolMessage and indicates a lookup failure
+        if isinstance(res, ToolMessage) and isinstance(res.content, str):
+            content = res.content
+            if "No exact match" in content or "No exact pref_name match" in content:
+                # Retrieve the misspelled/abbreviated target name
+                pref_name = request.tool_call["args"].get("pref_name", "")
+                if pref_name:
+                    resolved_name = self._fuzzy_match_target(pref_name)
+                    if resolved_name:
+                        # Override the tool request arguments with the resolved name
+                        new_args = {**request.tool_call["args"], "pref_name": resolved_name}
+                        new_tool_call = {**request.tool_call, "args": new_args}
+                        new_request = request.override(tool_call=new_tool_call)
+                        
+                        # Re-run the tool execution with the corrected name
+                        new_res = handler(new_request)
+                        if isinstance(new_res, ToolMessage) and isinstance(new_res.content, str):
+                            # Append a friendly recovery notice to the output
+                            new_res.content = (
+                                f"{new_res.content}\n\n"
+                                f"Note: Exact match not found for '{pref_name}'. Resolved to closest fuzzy match '{resolved_name}' via LangGraph recovery edge."
+                            )
+                        return new_res
+        return res
+
+    async def awrap_tool_call(self, request, handler):
+        # We also implement the async version to be fully compatible and robust
+        tool_name = request.tool.name if request.tool else request.tool_call["name"]
+        
+        if tool_name != "lookup_target_by_exact_name":
+            return await handler(request)
+            
+        res = await handler(request)
+        
+        if isinstance(res, ToolMessage) and isinstance(res.content, str):
+            content = res.content
+            if "No exact match" in content or "No exact pref_name match" in content:
+                pref_name = request.tool_call["args"].get("pref_name", "")
+                if pref_name:
+                    resolved_name = self._fuzzy_match_target(pref_name)
+                    if resolved_name:
+                        new_args = {**request.tool_call["args"], "pref_name": resolved_name}
+                        new_tool_call = {**request.tool_call, "args": new_args}
+                        new_request = request.override(tool_call=new_tool_call)
+                        
+                        new_res = await handler(new_request)
+                        if isinstance(new_res, ToolMessage) and isinstance(new_res.content, str):
+                            new_res.content = (
+                                f"{new_res.content}\n\n"
+                                f"Note: Exact match not found for '{pref_name}'. Resolved to closest fuzzy match '{resolved_name}' via LangGraph recovery edge."
+                            )
+                        return new_res
+        return res
+
+    def _fuzzy_match_target(self, pref_name: str) -> Optional[str]:
+        import difflib
+        global _ACTIVE_DATA_SOURCE, _LOCAL_DF
+        
+        # Build candidate options for target lookup
+        candidates = []
+        if _ACTIVE_DATA_SOURCE in ("synthetic", "custom") and _LOCAL_DF is not None:
+            target_col = None
+            for col in ["target", "target_name", "target_id", "Target", "Target_Name"]:
+                if col in _LOCAL_DF.columns:
+                    target_col = col
+                    break
+            if target_col is None:
+                target_col = "target" if "target" in _LOCAL_DF.columns else _LOCAL_DF.columns[0]
+            candidates = [str(t) for t in _LOCAL_DF[target_col].dropna().unique()]
+            context = f"Available local targets are: {candidates}."
+        else:
+            # Common target preferred names mapping
+            COMMON_TARGETS_MAP = {
+                "egfr": "Epidermal growth factor receptor",
+                "egrf": "Epidermal growth factor receptor",
+                "herg": "Voltage-gated inwardly rectifying potassium channel KCNH2",
+                "hegr": "Voltage-gated inwardly rectifying potassium channel KCNH2",
+                "ache": "Acetylcholinesterase",
+                "ace": "Angiotensin-converting enzyme",
+                "bace1": "Beta-secretase 1",
+                "cox1": "Cyclooxygenase-1",
+                "cox-1": "Cyclooxygenase-1",
+                "cox2": "Cyclooxygenase-2",
+                "cox-2": "Cyclooxygenase-2",
+                "jak1": "Tyrosine-protein kinase JAK1",
+                "jak2": "Tyrosine-protein kinase JAK2",
+                "jak3": "Tyrosine-protein kinase JAK3",
+                "cdk2": "Cyclin-dependent kinase 2",
+                "cdk4": "Cyclin-dependent kinase 4",
+                "p38": "Mitogen-activated protein kinase 14",
+                "p38 mapk": "Mitogen-activated protein kinase 14",
+                "p38_mapk": "Mitogen-activated protein kinase 14",
+                "alk": "ALK tyrosine kinase receptor",
+                "braf": "Serine/threonine-protein kinase B-Raf",
+            }
+            candidates = list(COMMON_TARGETS_MAP.values())
+            context = f"Common target preferred names in ChEMBL are: {candidates}."
+
+        prompt = (
+            f"The user queried for target name '{pref_name}', but it was not found.\n"
+            f"Context: {context}\n"
+            f"Use the `search_chembl_target` tool if needed to search for candidate targets. "
+            f"Select the single closest matching target preferred name and output only that name."
+        )
+
+        # Try executing resolving through downstream agent first
+        try:
+            agent = self.get_lookup_agent()
+            result = run_agent(agent, prompt)
+            resolved = extract_final_answer(result)
+            if resolved:
+                resolved = resolved.strip().strip("'\"` \n\r\t")
+                if _ACTIVE_DATA_SOURCE in ("synthetic", "custom") and candidates:
+                    matches = difflib.get_close_matches(resolved.lower(), [c.lower() for c in candidates], n=1, cutoff=0.5)
+                    if matches:
+                        for c in candidates:
+                            if c.lower() == matches[0]:
+                                return c
+                else:
+                    if get_target_by_pref_name(resolved):
+                        return resolved
+                    matches = difflib.get_close_matches(resolved.lower(), [c.lower() for c in candidates], n=1, cutoff=0.5)
+                    if matches:
+                        for c in candidates:
+                            if c.lower() == matches[0]:
+                                return c
+                    df = search_target(resolved)
+                    if not df.empty and "pref_name" in df.columns:
+                        return df["pref_name"].iloc[0]
+        except Exception:
+            pass
+
+        # Programmatic fallback
+        return self._programmatic_fallback(pref_name, candidates)
+
+    def _programmatic_fallback(self, pref_name: str, candidates: list[str]) -> Optional[str]:
+        import difflib
+        global _ACTIVE_DATA_SOURCE
+        
+        if _ACTIVE_DATA_SOURCE in ("synthetic", "custom"):
+            if candidates:
+                unique_targets_lower = {t.lower(): t for t in candidates}
+                matches = difflib.get_close_matches(pref_name.lower(), unique_targets_lower.keys(), n=1, cutoff=0.5)
+                if matches:
+                    return unique_targets_lower[matches[0]]
+        else:
+            COMMON_TARGETS_MAP = {
+                "egfr": "Epidermal growth factor receptor",
+                "egrf": "Epidermal growth factor receptor",
+                "herg": "Voltage-gated inwardly rectifying potassium channel KCNH2",
+                "hegr": "Voltage-gated inwardly rectifying potassium channel KCNH2",
+                "ache": "Acetylcholinesterase",
+                "ace": "Angiotensin-converting enzyme",
+                "bace1": "Beta-secretase 1",
+                "cox1": "Cyclooxygenase-1",
+                "cox-1": "Cyclooxygenase-1",
+                "cox2": "Cyclooxygenase-2",
+                "cox-2": "Cyclooxygenase-2",
+                "jak1": "Tyrosine-protein kinase JAK1",
+                "jak2": "Tyrosine-protein kinase JAK2",
+                "jak3": "Tyrosine-protein kinase JAK3",
+                "cdk2": "Cyclin-dependent kinase 2",
+                "cdk4": "Cyclin-dependent kinase 4",
+                "p38": "Mitogen-activated protein kinase 14",
+                "p38 mapk": "Mitogen-activated protein kinase 14",
+                "p38_mapk": "Mitogen-activated protein kinase 14",
+                "alk": "ALK tyrosine kinase receptor",
+                "braf": "Serine/threonine-protein kinase B-Raf",
+            }
+            target_key = pref_name.lower().strip()
+            if target_key in COMMON_TARGETS_MAP:
+                return COMMON_TARGETS_MAP[target_key]
+                
+            best_abbr_matches = difflib.get_close_matches(target_key, COMMON_TARGETS_MAP.keys(), n=1, cutoff=0.6)
+            if best_abbr_matches:
+                return COMMON_TARGETS_MAP[best_abbr_matches[0]]
+                
+            try:
+                df = search_target(pref_name)
+                if not df.empty and "pref_name" in df.columns:
+                    human_single = df[(df["organism"] == "Homo sapiens") & (df["target_type"] == "SINGLE PROTEIN")]
+                    candidates_search = human_single["pref_name"].dropna().tolist() if not human_single.empty else df["pref_name"].dropna().tolist()
+                    matches = difflib.get_close_matches(pref_name, candidates_search, n=1, cutoff=0.5)
+                    if matches:
+                        return matches[0]
+                    return df["pref_name"].iloc[0]
+            except Exception:
+                pass
+        return None
 
 
 def build_agent(model_name: str = DEFAULT_MODEL, temperature: float = 0.0):
@@ -668,7 +945,8 @@ def build_agent(model_name: str = DEFAULT_MODEL, temperature: float = 0.0):
         rate_limiter=rate_limiter,  # would wrap the model and break create_agent's bind_tools()
     )
 
-    return create_agent(llm, tools=TOOLS, system_prompt=SYSTEM_PROMPT)
+    middleware = [FuzzyMatchRecoveryMiddleware()]
+    return create_agent(llm, tools=TOOLS, system_prompt=SYSTEM_PROMPT, middleware=middleware)
 
 
 def run_agent(agent, user_input: str) -> dict:

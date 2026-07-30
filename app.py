@@ -86,6 +86,17 @@ def rename_id_column(df: pd.DataFrame) -> pd.DataFrame:
 def render_results_tables() -> None:
     """Show whichever result tables the agent populated during this run."""
     print(f"DEBUG APP: Reading from LAST_RESULTS. Keys: {list(LAST_RESULTS.keys())}, ID: {id(LAST_RESULTS)}")
+    
+    # 0. ADMET predictions display
+    if "admet_predictions" in LAST_RESULTS or "admet_fig" in LAST_RESULTS:
+        st.subheader("Absorption, Distribution, Metabolism, Excretion, and Toxicity (ADMET) profile")
+        if "admet_fig" in LAST_RESULTS and LAST_RESULTS["admet_fig"] is not None:
+            st.pyplot(LAST_RESULTS["admet_fig"])
+            st.caption("ADMET radar chart displaying DrugBank approved percentiles (higher scores indicate safer/better drug-like parameters).")
+        if "admet_predictions" in LAST_RESULTS and LAST_RESULTS["admet_predictions"] is not None:
+            st.dataframe(LAST_RESULTS["admet_predictions"])
+            st.caption("Detailed ADMET prediction table (all predicted properties and approved percentiles).")
+            
     # Find the most enriched table
     df = None
     table_type = None
@@ -420,11 +431,11 @@ st.title("Hit-to-Lead Agent")
 
 if data_source == "ChEMBL Database (Live API)":
     st.caption(
-        "Ask about a target to fetch ChEMBL bioactivity data and check Lipinski "
-        "Rule-of-Five compliance. Example: "
-        "\"Get IC50 data for EGFR and flag Lipinski violations.\""
+        "Ask about a target to fetch ChEMBL bioactivity data, check Lipinski compliance, "
+        "cluster molecules by chemotype, and rank by ligand efficiency. Example: "
+        "\"Get IC50 data for EGFR, run scaffold clustering, and perform SAR analysis.\""
     )
-    placeholder_text = "e.g. Find IC50 bioactivities for acetylcholinesterase and check drug-likeness"
+    placeholder_text = "e.g. Fetch IC50 bioactivities for EGFR, cluster by scaffold, and calculate ligand efficiencies"
 else:
     available_targets = []
     if local_df is not None:
@@ -441,9 +452,10 @@ else:
     
     st.caption(
         f"Querying the local dataset. Available targets: {targets_str}. "
-        f"Example: \"Find IC50 bioactivities for {example_target} and check Lipinski compliance.\""
+        "You can analyze drug-likeness, cluster by chemotype, rank by SAR, or execute custom queries. Example: "
+        f"\"Check the drug likeness of molecules targeting {example_target}.\""
     )
-    placeholder_text = f"e.g. Find IC50 bioactivities for {example_target} and check drug-likeness"
+    placeholder_text = f"e.g. Find the molecule targeting {example_target} with the smallest IC50"
 
 prompt = st.text_area(
     "Prompt",
