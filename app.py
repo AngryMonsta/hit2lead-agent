@@ -1,15 +1,18 @@
 """
 app.py
 ------
-One-page Streamlit page for the Hit to Lead drug-discovery agent.
+One-page Streamlit dashboard for the hit to lead drug-discovery agent.
 
 Run with:
     streamlit run app.py
 
 Requires GEMINI_API_KEY (or GOOGLE_API_KEY) to be set in your environment (see agent_tools.py).
 """
+import os
+import sys
 
-from __future__ import annotations
+# Add utils directory to path to resolve local module imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "utils"))
 
 import pandas as pd
 import streamlit as st

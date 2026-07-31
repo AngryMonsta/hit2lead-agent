@@ -16,7 +16,12 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from typing import Optional
+
+# Ensure sibling modules in utils can be resolved
+if os.path.dirname(__file__) not in sys.path:
+    sys.path.insert(0, os.path.dirname(__file__))
 
 import streamlit as st
 import pandas as pd
