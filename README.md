@@ -4,6 +4,13 @@ A natural language assistant for medicinal chemists to run analysis on drug scre
 
 The agent connects structured compound records (from ChEMBL or custom/synthetic LIMS uploads) with chemical intelligence (RDKit Lipinski Rule-of-Five checks, scaffold clustering, Ligand Efficiency SAR calculations, and ADMET property predictions using ADMET-AI) and semantic vector search (for unstructured comments/notes).
 
+## Screenshots
+
+| | | |
+|---|---|---|
+| ![ADMET profiling dashboard](screenshots/ADMET_Profiling.png) | ![ADMET prediction output](screenshots/ADMET_pred.png) | |
+| ![Clustering analysis](screenshots/clustering.png) | ![Prompt output example](screenshots/prompt_output0.png) | |
+
 ## Key Features
 
 1. **Medicinal Chemistry Assistant**: Interacts with compound screens using natural language. For example: *"Which molecules targeting SMARCA2 have an IC50 < 1 uM and pass Lipinski rules?"* or *"Cluster the compounds and analyze the structure-activity relationship."*
