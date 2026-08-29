@@ -6,10 +6,10 @@ The agent connects structured compound records (from ChEMBL or custom/synthetic 
 
 ## Screenshots
 
-| | | |
-|---|---|---|
-| ![ADMET profiling dashboard](screenshots/ADMET_Profiling.png) | ![ADMET prediction output](screenshots/ADMET_pred.png) | |
-| ![Clustering analysis](screenshots/clustering.png) | ![Prompt output example](screenshots/prompt_output0.png) | |
+| | |
+|---|---|
+| ![Prompt output example](screenshots/prompt_output0.png) <br> Prompt output example | ![Clustering analysis](screenshots/clustering.png) <br> Clustering analysis |
+| ![ADMET prediction output](screenshots/ADMET_pred.png) <br> ADMET prediction output | ![ADMET profiling dashboard](screenshots/ADMET_Profiling.png) <br> ADMET profiling dashboard |
 
 ## Key Features
 
